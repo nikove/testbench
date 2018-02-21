@@ -13,9 +13,10 @@
 package com.vaadin.testbench;
 
 import java.util.Collections;
-import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.openqa.selenium.JavascriptExecutor;
@@ -26,6 +27,7 @@ import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
 import org.openqa.selenium.support.ui.WebDriverWait;
 
+import com.vaadin.testbench.annotations.Attribute;
 import com.vaadin.testbench.elementsbase.Element;
 
 /**
@@ -46,7 +48,47 @@ import com.vaadin.testbench.elementsbase.Element;
  */
 public class ElementQuery<T extends TestBenchElement> {
 
-    private Map<String, String> attributes = new HashMap<>();
+    private static class AttributeMatch {
+        private String name;
+        private String operator;
+        private String value;
+
+        public AttributeMatch(String name, String value) {
+            this(name, "=", value);
+        }
+
+        public AttributeMatch(String name, String operator, String value) {
+            this.name = name;
+            this.operator = operator;
+            this.value = value;
+        }
+
+        public AttributeMatch(String name) {
+            this.name = name;
+            operator = null;
+        }
+
+        public String getExpression() {
+            if (operator == null) {
+                // [disabled]
+                return "[" + name + "]";
+            } else {
+                // [type='text']
+                return "[" + name + operator + "'" + escapeAttributeValue(value)
+                        + "']";
+            }
+        }
+
+        private static String escapeAttributeValue(String value) {
+            return value.replace("'", "\\'");
+        }
+
+    }
+
+    /**
+     * Linked to ensure that elements are always returned in the same order.
+     */
+    private Set<AttributeMatch> attributes = new LinkedHashSet<>();
     private SearchContext searchContext;
     private final Class<T> elementClass;
     private final String tagName;
@@ -72,6 +114,7 @@ public class ElementQuery<T extends TestBenchElement> {
     public ElementQuery(Class<T> elementClass, String tagName) {
         this.elementClass = elementClass;
         this.tagName = tagName;
+        attributes.addAll(getAttributes(elementClass));
     }
 
     /**
@@ -89,16 +132,40 @@ public class ElementQuery<T extends TestBenchElement> {
     }
 
     /**
-     * Adds the given attribute as a condition for the lookup.
+     * Requires the given attribute to match the given value.
+     * <p>
+     * For matching a token in the attribute, see
+     * {@link #attributeContains(String, String)}.
      *
-     * @param key
-     *            the attribute key
+     * @param name
+     *            the attribute name
      * @param value
      *            the attribute value
      * @return this element query instance for chaining
      */
-    public ElementQuery<T> attribute(String key, String value) {
-        attributes.put(key, value);
+    public ElementQuery<T> attribute(String name, String value) {
+        attributes.add(new AttributeMatch(name, value));
+        return this;
+    }
+
+    /**
+     * Requires the given attribute to contain the given value.
+     * <p>
+     * Compares with space separated tokens so that e.g.
+     * <code>attributeContains('class','myclass');</code> matches
+     * <code>class='someclass myclass'</code>.
+     * <p>
+     * For matching the full attribute value, see
+     * {@link #attribute(String, String)}.
+     *
+     * @param name
+     *            the attribute name
+     * @param token
+     *            the token to look for
+     * @return this element query instance for chaining
+     */
+    public ElementQuery<T> attributeContains(String name, String token) {
+        attributes.add(new AttributeMatch(name, "~=", token));
         return this;
     }
 
@@ -302,11 +369,39 @@ public class ElementQuery<T extends TestBenchElement> {
         return annotation.value();
     }
 
+    private static Set<AttributeMatch> getAttributes(
+            Class<? extends TestBenchElement> elementClass) {
+        Attribute[] attrs = elementClass.getAnnotationsByType(Attribute.class);
+        if (attrs == null) {
+            return Collections.emptySet();
+        }
+        Set<AttributeMatch> classAttributes = new HashSet<>();
+        for (Attribute attr : attrs) {
+            String toMatch;
+            if (!Attribute.DEFAULT_VALUE.equals(attr.value())) {
+                if (!Attribute.DEFAULT_VALUE.equals(attr.contains())) {
+                    throw new RuntimeException(
+                            "You can only define either 'contains' or 'value' for an @"
+                                    + Attribute.class.getSimpleName());
+                }
+                // [label='my-text']
+                classAttributes.add(
+                        new AttributeMatch(attr.name(), "=", attr.value()));
+            } else if (!Attribute.DEFAULT_VALUE.equals(attr.contains())) {
+                // [class~='js-card-name']
+                classAttributes.add(
+                        new AttributeMatch(attr.name(), "~=", attr.contains()));
+            } else {
+                // [disabled]
+                classAttributes.add(new AttributeMatch(attr.name()));
+            }
+        }
+        return classAttributes;
+    }
+
     private String getAttributePairs() {
         // [id='username'][label='Email'][special='foo\\'bar']
-        return attributes.entrySet().stream()
-                .map(entry -> "[" + entry.getKey() + "='"
-                        + escapeAttributeValue(entry.getValue()) + "']")
+        return attributes.stream().map(AttributeMatch::getExpression)
                 .collect(Collectors.joining());
     }
 
@@ -345,10 +440,6 @@ public class ElementQuery<T extends TestBenchElement> {
             }
             return (List) elements;
         }
-    }
-
-    private String escapeAttributeValue(String value) {
-        return value.replace("'", "\\'");
     }
 
 }
